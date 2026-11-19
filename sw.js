@@ -1,7 +1,7 @@
 // Service worker: primero red (para recibir siempre la última versión), caché como respaldo sin conexión.
-const CACHE = 'conciertos-v0.1.1';
+const CACHE = 'conciertos-v0.1.2';
 const SHELL = [
-  './', 'index.html', 'css/styles.css?v=0.1.1', 'js/app.js?v=0.1.1', 'js/geo.js', 'js/deezer.js',
+  './', 'index.html', 'css/styles.css?v=0.1.2', 'js/app.js?v=0.1.2', 'js/geo.js', 'js/deezer.js',
   'js/config.js', 'vendor/supabase.js', 'manifest.webmanifest', 'icons/apple-touch-icon.png', 'icons/icon-192.png',
 ];
 
