@@ -53,6 +53,10 @@ const ICONS = {
   camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4-4"/>',
   calplus: '<rect x="3" y="4.5" width="18" height="16.5" rx="3"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4M12 12.5v5M9.5 15h5"/>',
+  bell: '<path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+  map: '<path d="M9 4 3 6.5v13.5L9 17.5l6 2.5 6-2.5V4L15 6.5z"/><path d="M9 4v13.5M15 6.5V20"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/>',
 };
 const ico = (n, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${ICONS[n]}</svg>`;
@@ -98,6 +102,10 @@ const S = {
   photo: null,       // { results, loading }
   imgTried: new Set(),
   push: null,        // estado de los avisos en este iPhone
+  markRows: {},      // concierto → fila completa de mi marca (recordatorios, plan de Findes)
+  requests: [],      // peticiones de "Buscar ahora" sin atender
+  findesOk: new Set(), // planes de Findes que siguen existiendo
+  voy: null,         // borrador de la hoja "Voy"
 };
 
 let lastSeen = null;
@@ -107,13 +115,14 @@ try { lastSeen = localStorage.getItem('conciertos-visto'); } catch (_) { /* nada
 
 async function loadAll() {
   const since = isoOf(new Date(Date.now() - 400 * 86400000));
-  const [me, ar, fo, co, mk, ru] = await Promise.all([
+  const [me, ar, fo, co, mk, ru, rq] = await Promise.all([
     sb.from('members').select('*').eq('email', S.session.user.email.toLowerCase()).maybeSingle(),
     sb.from('conc_artists').select('*'),
     sb.from('conc_follows').select('*').order('created_at'),
     sb.from('conc_concerts').select('*').gte('event_date', since).order('event_date').order('event_time'),
     sb.from('conc_marks').select('*'),
     sb.from('conc_runs').select('*').order('ran_at', { ascending: false }).limit(20),
+    sb.from('conc_search_requests').select('*').is('done_at', null),
   ]);
   for (const r of [me, ar, fo, co, mk, ru]) if (r.error) throw r.error;
   if (!me.data) throw new Error('Este usuario no tiene acceso a la app.');
@@ -123,6 +132,13 @@ async function loadAll() {
   S.concerts = co.data;
   S.marks = Object.fromEntries(mk.data.map((m) => [m.concert_id, m.mark]));
   S.runs = ru.data;
+  S.markRows = Object.fromEntries(mk.data.map((m) => [m.concert_id, m]));
+  S.requests = rq.error ? [] : rq.data;
+  const planIds = mk.data.map((m) => m.findes_plan_id).filter(Boolean);
+  if (planIds.length) {
+    const pl = await sb.from('plans').select('id').in('id', planIds);
+    S.findesOk = new Set(pl.error ? [] : pl.data.map((x) => x.id));
+  }
   S.loaded = true;
   fillMissingImages();
 }
@@ -349,7 +365,12 @@ function viewCalendario() {
   const t = todayIso();
 
   let grid = '';
-  if (S.calView === 'mes') {
+  if (S.calView === 'mapa') {
+    const placed = list.filter((c) => c.lat != null && c.lng != null);
+    const missing = list.length - placed.length;
+    grid = `<div id="map" class="map"></div>
+      <p class="muted sm pad-y">${placed.length} concierto${placed.length === 1 ? '' : 's'} en el mapa${missing ? ` · ${missing} aún sin situar (se sitúan en la siguiente búsqueda)` : ''}</p>`;
+  } else if (S.calView === 'mes') {
     const cells = [];
     for (let i = 0; i < startDow; i++) cells.push('<div class="cell blank"></div>');
     for (let d = 1; d <= daysIn; d++) {
@@ -386,11 +407,12 @@ function viewCalendario() {
 
   return `
   <div class="screen">
-    <header class="top row-between">
+    <header class="top row-between cal-top">
       <h1>Calendario</h1>
       <div class="seg">
         <button class="${S.calView === 'mes' ? 'on' : ''}" data-act="calview" data-v="mes">Mes</button>
         <button class="${S.calView === 'lista' ? 'on' : ''}" data-act="calview" data-v="lista">Lista</button>
+        <button class="${S.calView === 'mapa' ? 'on' : ''}" data-act="calview" data-v="mapa">Mapa</button>
       </div>
     </header>
     ${markChips()}
@@ -507,6 +529,7 @@ function viewArtista(id) {
         <span><strong>Buscar cada día</strong><br><span class="muted sm">${f.active ? 'Activo' : 'En pausa: no se busca ni se avisa'}</span></span>
         <input type="checkbox" class="switch" data-act="toggle-active" data-id="${id}" ${f.active ? 'checked' : ''}>
       </label>
+      ${searchNowBlock(id)}
       <h2 class="sec sm">Próximos conciertos</h2>
       ${up.length ? `<div class="stack-s">${up.map((c) => concertCard(c, { showArtist: false })).join('')}</div>` : '<p class="muted">Nada anunciado por ahora.</p>'}
       ${past.length ? `<h2 class="sec sm">Conciertos a los que fuiste</h2><div class="stack-s">${past.map((c) => concertCard(c, { showArtist: false })).join('')}</div>` : ''}
@@ -545,10 +568,12 @@ function viewConcierto(id) {
       <div class="marks">
         ${Object.entries(MARKS).map(([k, m]) => `<button class="mbtn ${mark === k ? 'on ' + k : ''}" data-act="mark" data-id="${c.id}" data-v="${k}">${ico(m.icon)}${m.label}</button>`).join('')}
       </div>
+      ${mark === 'voy' ? voyInfo(c) : ''}
       <div class="info">
         ${row('clock', esc(fmtLong(c.event_date)), c.event_time ? `A las ${fmtTime(c.event_time)}` : 'Hora sin confirmar')}
         ${row('pin', esc(c.venue || 'Lugar sin confirmar'), esc([c.address, where].filter(Boolean).join(' · ')), c.venue || c.address ? maps : '')}
         ${c.price ? row('euro', esc(c.price)) : ''}
+        ${c.on_sale_date && c.on_sale_date >= todayIso() ? row('bell', `Entradas a la venta el ${esc(fmtShort(c.on_sale_date))}${c.on_sale_time ? ' a las ' + fmtTime(c.on_sale_time) : ''}`, 'Te avisaré ese día por la mañana') : ''}
         ${c.tickets_url ? row('ticket', 'Comprar entradas', esc(domainOf(c.tickets_url)), c.tickets_url) : ''}
         ${c.tickets_info ? row('ticket', 'Entradas', esc(c.tickets_info)) : ''}
       </div>
@@ -669,6 +694,147 @@ function pushSection() {
   return `<div class="group stack-s padin"><p class="muted sm" style="margin:0">${txt}</p>${btn}</div>`;
 }
 
+// ------------------------------------------------------------------ Voy: recordatorios y Findes
+
+const REMINDER_OPTS = [[0, 'El mismo día'], [1, '1 día antes'], [3, '3 días antes'], [7, '1 semana antes'], [15, '15 días antes'], [30, '1 mes antes']];
+const reminderText = (list) => {
+  if (!list || !list.length) return 'Sin recordatorio';
+  return [...list].sort((a, b) => b - a).map((d) => (REMINDER_OPTS.find((o) => o[0] === d)?.[1] || `${d} días antes`).toLowerCase()).join(' · ');
+};
+const isWeekendish = (iso) => [5, 6, 0].includes(parseIso(iso).getDay()); // vie, sáb, dom
+const findesPlanOf = (c) => { const id = S.markRows[c.id]?.findes_plan_id; return id && S.findesOk.has(id) ? id : null; };
+
+function voyInfo(c) {
+  const mr = S.markRows[c.id] || {};
+  const inFindes = findesPlanOf(c);
+  return `<div class="info">
+    <button class="irow btnrow" data-act="voy-edit" data-id="${c.id}">${ico('bell')}<div class="grow"><div>Recordatorio</div><div class="muted sm">${esc(reminderText(mr.reminders))}</div></div>${ico('right', 'chev')}</button>
+    ${inFindes ? `<div class="irow">${ico('check')}<div class="grow"><div>En Findes</div><div class="muted sm">Añadido como plan del fin de semana</div></div></div>`
+      : isWeekendish(c.event_date) ? `<button class="irow btnrow" data-act="voy-edit" data-id="${c.id}">${ico('calplus')}<div class="grow"><div>Añadir a Findes</div><div class="muted sm">Cae en fin de semana</div></div>${ico('right', 'chev')}</button>` : ''}
+  </div>`;
+}
+
+function openVoySheet(id) {
+  const c = S.concerts.find((x) => x.id === id);
+  const mr = S.markRows[id] || {};
+  S.voy = { id, reminders: [...(mr.reminders || [])], findes: false, who: 'yo', canFindes: isWeekendish(c.event_date) && !findesPlanOf(c) };
+  S.sheet = 'voy';
+}
+
+function sheetVoy() {
+  const V = S.voy; const c = S.concerts.find((x) => x.id === V.id);
+  return `
+    <h3>🎟️ ¡Vas a ver a ${esc(artistName(c.artist_id))}!</h3>
+    <p class="muted" style="margin:-4px 0 0">${esc(fmtShort(c.event_date))}${c.event_time ? ' · ' + fmtTime(c.event_time) : ''} · ${esc([c.venue, c.city].filter(Boolean).join(', '))}</p>
+    <div class="fld"><span>¿Quieres que te lo recuerde?</span></div>
+    <div class="typegrid">
+      <button class="fchip ${V.reminders.length ? '' : 'on'}" data-act="rem-none">Sin recordatorio</button>
+      ${REMINDER_OPTS.map(([d, l]) => `<button class="fchip ${V.reminders.includes(d) ? 'on' : ''}" data-act="rem" data-v="${d}">${l}</button>`).join('')}
+    </div>
+    <p class="muted sm" style="margin:-4px 0 0">Puedes elegir varios. El aviso llega por la mañana.</p>
+    ${V.canFindes ? `
+      <label class="switchrow">
+        <span><strong>Añadir a Findes</strong><br><span class="muted sm">Lo crea como plan de ese fin de semana</span></span>
+        <input type="checkbox" class="switch" data-voy="findes" ${V.findes ? 'checked' : ''}>
+      </label>
+      ${V.findes ? `<div class="seg wide"><button class="${V.who === 'yo' ? 'on' : ''}" data-act="voy-who" data-v="yo">Solo yo</button><button class="${V.who === 'ambos' ? 'on' : ''}" data-act="voy-who" data-v="ambos">Los dos</button></div>` : ''}` : ''}
+    <div class="row2">
+      <button class="btn ghost" data-act="sheet-close">Ahora no</button>
+      <button class="btn primary" data-act="voy-save">Guardar</button>
+    </div>`;
+}
+
+async function saveVoy() {
+  const V = S.voy; const c = S.concerts.find((x) => x.id === V.id);
+  const email = S.session.user.email.toLowerCase();
+  const r = await sb.from('conc_marks').update({ reminders: V.reminders }).eq('concert_id', V.id).eq('email', email);
+  if (r.error) { toast('Error: ' + r.error.message); return; }
+  S.markRows[V.id] = { ...(S.markRows[V.id] || {}), reminders: V.reminders };
+  let msg = V.reminders.length ? 'Recordatorio guardado' : 'Guardado';
+  if (V.canFindes && V.findes) {
+    const who = V.who === 'ambos' ? 'ambos' : (S.me.person || 'ambos');
+    const p = await sb.from('plans').insert({
+      title: `Concierto: ${artistName(c.artist_id)}`, category: 'concierto', who,
+      date_from: c.event_date, date_to: c.event_date, start_time: c.event_time || null,
+      location: [c.venue, c.city].filter(Boolean).join(', ') || null, status: 'confirmado',
+      notes: [c.title, c.tickets_url || c.source_url].filter(Boolean).join('\n') || null,
+    }).select('id').single();
+    if (p.error) { toast('No se pudo añadir a Findes: ' + p.error.message); }
+    else {
+      await sb.from('conc_marks').update({ findes_plan_id: p.data.id }).eq('concert_id', V.id).eq('email', email);
+      S.markRows[V.id].findes_plan_id = p.data.id; S.findesOk.add(p.data.id);
+      msg += ' y añadido a Findes';
+    }
+  }
+  S.sheet = null; S.voy = null; softRender(); toast(msg);
+}
+
+// ------------------------------------------------------------------ Buscar ahora
+
+const pendingFor = (artistId) => S.requests.find((r) => r.artist_id === artistId && !r.done_at);
+
+function searchNowBlock(id) {
+  const p = pendingFor(id);
+  if (p) {
+    const t = new Date(p.created_at);
+    return `<div class="pending">${ico('refresh')}<div><strong>Búsqueda pedida a las ${pad(t.getHours())}:${pad(t.getMinutes())}</strong><div class="muted sm">Los resultados llegarán en menos de una hora (entre las 10:00 y las 23:00).</div></div></div>`;
+  }
+  return `<button class="btn ghost" data-act="search-now" data-id="${id}">${ico('refresh')}Buscar ahora</button>`;
+}
+
+async function requestSearch(artistId, quiet = false) {
+  if (pendingFor(artistId)) return;
+  const r = await sb.from('conc_search_requests').insert({ artist_id: artistId }).select().single();
+  if (r.error) { if (!quiet) toast('Error: ' + r.error.message); return; }
+  S.requests.push(r.data);
+  if (!quiet) { toast('Búsqueda pedida'); softRender(); }
+}
+
+// ------------------------------------------------------------------ mapa
+
+let leafletReady = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletReady) return leafletReady;
+  leafletReady = new Promise((resolve, reject) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'vendor/leaflet/leaflet.css'; document.head.appendChild(css);
+    const js = document.createElement('script'); js.src = 'vendor/leaflet/leaflet.js'; js.onload = resolve; js.onerror = reject; document.head.appendChild(js);
+  });
+  return leafletReady;
+}
+
+let mapObj = null;
+async function initMap() {
+  const el = document.getElementById('map');
+  if (!el) return;
+  try { await loadLeaflet(); } catch (_) { el.innerHTML = '<p class="muted pad">No se pudo cargar el mapa.</p>'; return; }
+  if (!document.body.contains(el)) return;
+  if (mapObj) { try { mapObj.remove(); } catch (_) { /* nada */ } }
+  const L = window.L;
+  mapObj = L.map(el, { zoomControl: false, attributionControl: true });
+  mapObj.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 18, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO',
+  }).addTo(mapObj);
+  const list = filtered(myConcerts()).filter((c) => c.lat != null && c.lng != null);
+  const groups = {};
+  for (const c of list) (groups[`${c.lat.toFixed(3)},${c.lng.toFixed(3)}`] ||= []).push(c);
+  const pts = [];
+  for (const g of Object.values(groups)) {
+    const c0 = g[0];
+    const going = g.some((c) => S.marks[c.id] === 'voy');
+    const m = L.circleMarker([c0.lat, c0.lng], {
+      radius: g.length > 1 ? 11 : 9, color: going ? '#FFFFFF' : '#07070A', weight: going ? 3 : 2,
+      fillColor: artistColor(c0.artist_id), fillOpacity: 1,
+    }).addTo(mapObj);
+    m.bindPopup(`<div class="mpop">${g.map((c) => `<a href="#/concierto/${c.id}"><b>${esc(artistName(c.artist_id))}</b><span>${esc(fmtShort(c.event_date))}${c.event_time ? ' · ' + fmtTime(c.event_time) : ''}</span><span>${esc([c.venue, c.city].filter(Boolean).join(', '))}</span></a>`).join('')}</div>`);
+    pts.push([c0.lat, c0.lng]);
+  }
+  if (pts.length > 1) mapObj.fitBounds(pts, { padding: [40, 40], maxZoom: 9 });
+  else if (pts.length === 1) mapObj.setView(pts[0], 8);
+  else mapObj.setView([40.2, -3.7], 5);
+}
+
 // ------------------------------------------------------------------ hojas inferiores
 
 function sheetFiltros() {
@@ -745,7 +911,7 @@ function sheetBorrar() {
 
 function sheetHtml() {
   if (!S.sheet) return '';
-  const inner = { filtros: sheetFiltros, zona: sheetZona, foto: sheetFoto, borrar: sheetBorrar }[S.sheet]?.() || '';
+  const inner = { filtros: sheetFiltros, zona: sheetZona, foto: sheetFoto, borrar: sheetBorrar, voy: sheetVoy }[S.sheet]?.() || '';
   return `<div class="backdrop" data-act="sheet-close"></div><div class="sheet"><div class="grab"></div>${inner}</div>`;
 }
 
@@ -768,6 +934,7 @@ function render() {
     default: html = viewInicio();
   }
   app.innerHTML = html + sheetHtml();
+  if (r.name === 'calendario' && S.calView === 'mapa' && !S.sheet) initMap();
 }
 
 // Repintar sin perder el scroll
@@ -816,6 +983,7 @@ async function saveArtist() {
   const r2 = await sb.from('conc_follows').insert({ artist_id: artist.id, zones: A.zones });
   if (r2.error) { toast('Error: ' + r2.error.message); return; }
   S.add = null;
+  await requestSearch(artist.id, true);
   await loadAll();
   location.hash = `#/artista/${artist.id}`;
   toast(`Siguiendo a ${artist.name}`);
@@ -834,11 +1002,14 @@ async function setMark(id, v) {
     const r = await sb.from('conc_marks').delete().eq('concert_id', id).eq('email', S.session.user.email.toLowerCase());
     if (r.error) { toast('Error: ' + r.error.message); return; }
     delete S.marks[id];
+    if (S.markRows[id]?.findes_plan_id && S.findesOk.has(S.markRows[id].findes_plan_id)) toast('El plan sigue en Findes: bórralo allí si ya no vas');
+    delete S.markRows[id];
   } else {
     const r = await sb.from('conc_marks').upsert({ concert_id: id, mark: v });
     if (r.error) { toast('Error: ' + r.error.message); return; }
     S.marks[id] = v;
-    if (v === 'voy') toast('¡A disfrutarlo! 🎟️');
+    S.markRows[id] = { ...(S.markRows[id] || {}), mark: v };
+    if (v === 'voy') openVoySheet(id);
     if (v === 'descartado') toast('Oculto. Lo puedes recuperar desde aquí.');
   }
   softRender();
@@ -944,7 +1115,7 @@ document.addEventListener('click', async (ev) => {
     }
     case 'day': S.calDay = v && S.calDay !== v ? v : null; softRender(); break;
     case 'sheet': S.sheet = v; if (v === 'zona') S.zoneDraft = null; softRender(); break;
-    case 'sheet-close': S.sheet = null; S.photo = null; softRender(); break;
+    case 'sheet-close': S.sheet = null; S.photo = null; S.voy = null; softRender(); break;
     case 'pick': S.add.picked = S.add.results[Number(el.dataset.i)]; softRender(); window.scrollTo(0, 0); break;
     case 'pick-manual': S.add.picked = { id: null, name: S.add.q, image: null }; softRender(); break;
     case 'unpick': S.add.picked = null; softRender(); break;
@@ -990,6 +1161,12 @@ document.addEventListener('click', async (ev) => {
     case 'photo-pick': await setFollowImage(route().id, S.photo.results[Number(el.dataset.i)].image); toast('Foto cambiada'); break;
     case 'photo-reset': await setFollowImage(route().id, null); break;
     case 'mark': await setMark(el.dataset.id, v); break;
+    case 'voy-edit': openVoySheet(el.dataset.id); softRender(); break;
+    case 'rem-none': S.voy.reminders = []; softRender(); break;
+    case 'rem': { const d = Number(v); S.voy.reminders = S.voy.reminders.includes(d) ? S.voy.reminders.filter((x) => x !== d) : [...S.voy.reminders, d]; softRender(); break; }
+    case 'voy-who': S.voy.who = v; softRender(); break;
+    case 'voy-save': el.disabled = true; await saveVoy(); break;
+    case 'search-now': await requestSearch(el.dataset.id); break;
     case 'ics': downloadIcs(S.concerts.find((c) => c.id === el.dataset.id)); break;
     case 'pwd': await changePassword(); break;
     case 'push-on': await enablePush(); break;
@@ -1012,6 +1189,8 @@ document.addEventListener('change', async (ev) => {
     if (el.dataset.filter === 'fCountry') { S.fProvince = ''; S.fCity = ''; }
     if (el.dataset.filter === 'fProvince') S.fCity = '';
     softRender();
+  } else if (el.dataset.voy === 'findes') {
+    S.voy.findes = el.checked; softRender();
   } else if (el.dataset.zone) {
     S.zoneDraft[el.dataset.zone] = el.value;
   } else if (el.dataset.act === 'toggle-active') {
