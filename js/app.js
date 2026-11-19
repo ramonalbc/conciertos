@@ -1,4 +1,4 @@
-import { SUPABASE_URL, SUPABASE_KEY, APP_VERSION, SEARCH_HOUR, ARTIST_COLORS } from './config.js';
+import { SUPABASE_URL, SUPABASE_KEY, APP_VERSION, SEARCH_HOUR, ARTIST_COLORS, VAPID_PUBLIC_KEY } from './config.js';
 import {
   CONTINENTS, REGIONS_ES, PROVINCES_ES, countryName, countriesOf, allCountries, provincesOf,
   norm, inZone, zoneLabel, zoneKey,
@@ -97,6 +97,7 @@ const S = {
   add: null,         // { q, results, loading, picked, zones, manual }
   photo: null,       // { results, loading }
   imgTried: new Set(),
+  push: null,        // estado de los avisos en este iPhone
 };
 
 let lastSeen = null;
@@ -580,7 +581,7 @@ function viewAjustes() {
         <div class="grow-row"><span>Artistas que sigues</span><span class="muted">${S.follows.filter((f) => f.active).length} activos</span></div>
       </div>
       <h2 class="sec sm">Avisos</h2>
-      <div class="group"><div class="grow-row"><span class="muted sm" style="text-align:left">Los avisos al iPhone de conciertos nuevos y cambios llegarán en la siguiente fase.</span></div></div>
+      ${pushSection()}
       <h2 class="sec sm">Contraseña</h2>
       <div class="group stack-s padin">
         <input id="pwd1" type="password" placeholder="Nueva contraseña" autocomplete="new-password">
@@ -593,6 +594,79 @@ function viewAjustes() {
     </div>
   </div>
   ${tabbar('ajustes')}`;
+}
+
+// ------------------------------------------------------------------ avisos push
+
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+function b64ToBytes(b64) {
+  const p = '='.repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + p).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+async function currentSub() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function refreshPushState() {
+  let st;
+  try {
+    if (!isStandalone()) st = 'not-installed';
+    else if (!pushSupported()) st = 'unsupported';
+    else if (Notification.permission === 'denied') st = 'denied';
+    else st = (await currentSub()) ? 'on' : 'off';
+  } catch (_) { st = 'unsupported'; }
+  if (st !== S.push) { S.push = st; if (route().name === 'ajustes') softRender(); }
+}
+
+async function enablePush() {
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Sin permiso para avisos'); await refreshPushState(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(VAPID_PUBLIC_KEY) });
+    const j = sub.toJSON();
+    const r = await sb.from('conc_push_subscriptions').upsert({
+      endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, device: navigator.userAgent.slice(0, 120),
+    });
+    if (r.error) throw r.error;
+    toast('Avisos activados en este iPhone');
+  } catch (e) {
+    toast('No se pudieron activar: ' + (e.message || e));
+  }
+  await refreshPushState();
+}
+
+async function disablePush() {
+  const sub = await currentSub();
+  if (sub) {
+    await sb.from('conc_push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    await sub.unsubscribe();
+  }
+  toast('Avisos desactivados');
+  await refreshPushState();
+}
+
+function pushSection() {
+  const st = S.push;
+  let txt; let btn = '';
+  if (st === 'not-installed') txt = 'Para recibir avisos, abre Conciertos desde el icono de la pantalla de inicio (no desde Safari).';
+  else if (st === 'unsupported') txt = 'Este dispositivo no admite avisos.';
+  else if (st === 'denied') txt = 'Los avisos están bloqueados. Actívalos en Ajustes del iPhone → Notificaciones → Conciertos.';
+  else if (st === 'on') {
+    txt = 'Te avisaré cuando aparezca un concierto nuevo de tus artistas en tus zonas, o cuando uno se cancele, se aplace, se agote o cambie de fecha, hora o lugar.';
+    btn = `<button class="btn ghost" data-act="test-push">Enviar aviso de prueba</button>
+           <button class="link sm center" data-act="push-off">Desactivar avisos en este iPhone</button>`;
+  } else if (st === 'off') {
+    txt = 'Recibe un aviso cuando aparezca un concierto nuevo o cambie uno de los tuyos.';
+    btn = `<button class="btn primary" data-act="push-on">Activar avisos en este iPhone</button>`;
+  } else txt = 'Comprobando…';
+  return `<div class="group stack-s padin"><p class="muted sm" style="margin:0">${txt}</p>${btn}</div>`;
 }
 
 // ------------------------------------------------------------------ hojas inferiores
@@ -918,6 +992,13 @@ document.addEventListener('click', async (ev) => {
     case 'mark': await setMark(el.dataset.id, v); break;
     case 'ics': downloadIcs(S.concerts.find((c) => c.id === el.dataset.id)); break;
     case 'pwd': await changePassword(); break;
+    case 'push-on': await enablePush(); break;
+    case 'push-off': await disablePush(); break;
+    case 'test-push': {
+      const r = await sb.rpc('conc_test_push');
+      toast(r.error ? 'Error: ' + r.error.message : 'Aviso enviado: debería llegar en unos segundos');
+      break;
+    }
     case 'logout': await sb.auth.signOut(); break;
     case 'retry': S.error = null; boot(); break;
     default: break;
@@ -974,6 +1055,7 @@ window.addEventListener('hashchange', () => {
   S.sheet = null; S.photo = null;
   render();
   window.scrollTo(0, 0);
+  if (r.name === 'ajustes') refreshPushState();
 });
 
 // ------------------------------------------------------------------ arranque
@@ -987,6 +1069,7 @@ async function boot() {
   if (!S.session) return;
   try { await loadAll(); } catch (e) { S.error = e.message || String(e); }
   render();
+  refreshPushState();
   markSeen(); // lo nuevo se sigue marcando como "Nuevo" hasta la siguiente visita
 }
 
