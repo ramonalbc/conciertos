@@ -779,7 +779,8 @@ function searchNowBlock(id) {
     const t = new Date(p.created_at);
     return `<div class="pending">${ico('refresh')}<div><strong>Búsqueda pedida a las ${pad(t.getHours())}:${pad(t.getMinutes())}</strong><div class="muted sm">Los resultados llegarán en menos de una hora (entre las 10:00 y las 23:00).</div></div></div>`;
   }
-  return `<button class="btn ghost" data-act="search-now" data-id="${id}">${ico('refresh')}Buscar ahora</button>`;
+  return `<div class="stack-s"><button class="btn ghost" data-act="search-now" data-id="${id}">${ico('refresh')}Pedir una búsqueda</button>
+    <p class="muted sm center" style="margin:0">Se hace en la próxima hora (entre las 10:00 y las 23:00), sin esperar a la de cada mañana.</p></div>`;
 }
 
 async function requestSearch(artistId, quiet = false) {
@@ -787,7 +788,7 @@ async function requestSearch(artistId, quiet = false) {
   const r = await sb.from('conc_search_requests').insert({ artist_id: artistId }).select().single();
   if (r.error) { if (!quiet) toast('Error: ' + r.error.message); return; }
   S.requests.push(r.data);
-  if (!quiet) { toast('Búsqueda pedida'); softRender(); }
+  if (!quiet) { toast('Búsqueda pedida: resultados en menos de una hora'); softRender(); }
 }
 
 // ------------------------------------------------------------------ mapa

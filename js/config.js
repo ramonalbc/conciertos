@@ -3,7 +3,7 @@
 export const SUPABASE_URL = 'https://sfizuisbomgkvvkvylmq.supabase.co';
 export const SUPABASE_KEY = 'sb_publishable_froAG8ZB_4InA7ItrhMYQw_t4buUvC8';
 
-export const APP_VERSION = '0.3.0';
+export const APP_VERSION = '0.3.1';
 
 // Hora aproximada de la búsqueda diaria (informativa)
 export const SEARCH_HOUR = '10:00';
