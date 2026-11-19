@@ -798,13 +798,27 @@ function downloadIcs(c) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+// Se carga con <img> (más compatible en iPhone que createImageBitmap) y se reduce a JPEG
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('no se pudo leer la imagen')); };
+    img.src = url;
+  });
+}
+
 async function resizeImage(file, max = 900) {
-  const bmp = await createImageBitmap(file);
-  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const img = await loadImage(file);
+  const w = img.naturalWidth; const h = img.naturalHeight;
+  const k = Math.min(1, max / Math.max(w, h));
   const cv = document.createElement('canvas');
-  cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
-  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
-  return new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.85));
+  cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  const blob = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.85));
+  if (!blob) throw new Error('no se pudo preparar la imagen');
+  return blob;
 }
 
 async function uploadPhoto(file) {
@@ -813,7 +827,7 @@ async function uploadPhoto(file) {
   try {
     const blob = await resizeImage(file);
     const path = `artistas/${S.me.person || 'yo'}-${id}-${Date.now()}.jpg`;
-    const up = await sb.storage.from('conciertos').upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+    const up = await sb.storage.from('conciertos').upload(path, blob, { contentType: 'image/jpeg' });
     if (up.error) throw up.error;
     const url = sb.storage.from('conciertos').getPublicUrl(path).data.publicUrl;
     await setFollowImage(id, url);
